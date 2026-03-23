@@ -1,0 +1,29 @@
+# Data
+data/
+
+# Model weights
+denoising_model.pth
+
+# Results
+results/
+results.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cache
+.ruff_cache/
