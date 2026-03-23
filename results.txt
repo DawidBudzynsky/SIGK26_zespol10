@@ -1,0 +1,3 @@
+Method,PSNR,SSIM,LPIPS
+DenoisingModel,28.8692,0.9858,0.0460
+Bilateral,23.0814,0.9426,0.2230

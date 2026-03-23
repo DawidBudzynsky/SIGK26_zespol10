@@ -17,7 +17,7 @@ from src.upscaling.dataset import UpscaleDataset
 DATA_DIR = "/root/sigk/data/div2k/DIV2K_train_HR"
 TEST_DATA_DIR = "/root/sigk/data/div2k/DIV2K_valid_HR"
 BATCH_SIZE = 8
-NUM_EPOCHS = 30
+NUM_EPOCHS = 50
 LEARNING_RATE = 1e-4
 LOW_RES_SIZE = 32
 HIGH_RES_SIZE = 256
