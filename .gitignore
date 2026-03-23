@@ -3,10 +3,13 @@ data/
 
 # Model weights
 denoising_model.pth
+upscale_model.pth
 
 # Results
 results/
 results.txt
+results_upscaling/
+results_upscaling.txt
 
 # Python
 __pycache__/
