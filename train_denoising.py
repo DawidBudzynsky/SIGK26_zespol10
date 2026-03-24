@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
-"""Simple training and evaluation for DenoisingModel on DIV2K dataset."""
-
+import argparse
 import os
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -12,13 +11,18 @@ from torchmetrics.functional import (
     structural_similarity_index_measure,
 )
 import lpips
+import matplotlib.pyplot as plt
 from src.denoising.models.denoising_autodecoder import DenoisingModel
 from src.denoising.dataset import NoisyImageDataset
 from src.denoising.methods.bilateral import bilateral_denoise
 from src.denoising.dataset import resize_stretch
 
-DATA_DIR = "/root/sigk/data/div2k/DIV2K_train_HR"
-TEST_DATA_DIR = "/root/sigk/data/div2k/DIV2K_valid_HR"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data", "div2k", "DIV2K_train_HR")
+TEST_DATA_DIR = os.path.join(SCRIPT_DIR, "data", "div2k", "DIV2K_valid_HR")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output", "denoising")
+MODEL_PATH = os.path.join(OUTPUT_DIR, "denoising_model.pth")
+
 BATCH_SIZE = 8
 NUM_EPOCHS = 50
 LEARNING_RATE = 1e-3
@@ -78,8 +82,8 @@ def train():
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch + 1}/{NUM_EPOCHS}, Loss: {avg_loss:.6f}")
 
-    torch.save(model.state_dict(), "/root/sigk/denoising_model.pth")
-    print("Model saved to denoising_model.pth")
+    torch.save(model.state_dict(), MODEL_PATH)
+    print(f"Model saved to {MODEL_PATH}")
     return model
 
 
@@ -95,11 +99,14 @@ def evaluate(model):
     test_dataset.noisy_images = test_dataset.noisy_images[:NUM_TEST]
 
     results = {
-        "DenoisingModel": {"psnr": [], "ssim": [], "lpips": []},
-        "Bilateral": {"psnr": [], "ssim": [], "lpips": []},
+        "summary": {
+            "DenoisingModel": {"psnr": [], "ssim": [], "lpips": []},
+            "Bilateral": {"psnr": [], "ssim": [], "lpips": []},
+        },
+        "per_image": [],
     }
 
-    os.makedirs("/root/sigk/results", exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     with torch.no_grad():
         for idx in range(len(test_dataset)):
@@ -112,24 +119,32 @@ def evaluate(model):
                 denoised = model(noisy_batch).squeeze(0)
 
             noisy_np = noisy.permute(1, 2, 0).cpu().numpy()
+            clean_np = clean.permute(1, 2, 0).cpu().numpy()
+            denoised_np = denoised.permute(1, 2, 0).cpu().numpy()
             bilateral_result = bilateral_denoise(noisy_np)
 
-            psnr, ssim, lpips_val = compute_metrics(denoised, clean)
-            results["DenoisingModel"]["psnr"].append(psnr)
-            results["DenoisingModel"]["ssim"].append(ssim)
-            results["DenoisingModel"]["lpips"].append(lpips_val)
+            psnr_model, ssim_model, lpips_model_val = compute_metrics(denoised, clean)
+            results["summary"]["DenoisingModel"]["psnr"].append(psnr_model)
+            results["summary"]["DenoisingModel"]["ssim"].append(ssim_model)
+            results["summary"]["DenoisingModel"]["lpips"].append(lpips_model_val)
 
             bilateral_tensor = (
                 torch.from_numpy(bilateral_result).permute(2, 0, 1).float().to(DEVICE)
             )
-            psnr, ssim, lpips_val = compute_metrics(bilateral_tensor, clean)
-            results["Bilateral"]["psnr"].append(psnr)
-            results["Bilateral"]["ssim"].append(ssim)
-            results["Bilateral"]["lpips"].append(lpips_val)
+            psnr_bilateral, ssim_bilateral, lpips_bilateral_val = compute_metrics(bilateral_tensor, clean)
+            results["summary"]["Bilateral"]["psnr"].append(psnr_bilateral)
+            results["summary"]["Bilateral"]["ssim"].append(ssim_bilateral)
+            results["summary"]["Bilateral"]["lpips"].append(lpips_bilateral_val)
+
+            results["per_image"].append({
+                "image_idx": idx,
+                "DenoisingModel": {"psnr": psnr_model, "ssim": ssim_model, "lpips": lpips_model_val},
+                "Bilateral": {"psnr": psnr_bilateral, "ssim": ssim_bilateral, "lpips": lpips_bilateral_val},
+            })
 
             if idx < 5:
                 create_comparison_image(
-                    noisy_np, clean_np, denoised, bilateral_result, idx
+                    noisy_np, clean_np, denoised_np, bilateral_result, idx
                 )
 
     print("\n" + "=" * 60)
@@ -138,27 +153,23 @@ def evaluate(model):
     print(f"{'Method':<20} {'PSNR':>10} {'SSIM':>10} {'LPIPS':>10}")
     print("-" * 60)
 
-    for method, metrics in results.items():
+    for method, metrics in results["summary"].items():
         psnr = np.mean(metrics["psnr"])
         ssim = np.mean(metrics["ssim"])
-        lpips = np.mean(metrics["lpips"])
-        print(f"{method:<20} {psnr:>10.4f} {ssim:>10.4f} {lpips:>10.4f}")
+        lpips_val = np.mean(metrics["lpips"])
+        print(f"{method:<20} {psnr:>10.4f} {ssim:>10.4f} {lpips_val:>10.4f}")
+        metrics["mean"] = {"psnr": psnr, "ssim": ssim, "lpips": lpips_val}
 
     print("=" * 60)
 
-    with open("/root/sigk/results.txt", "w") as f:
-        f.write("Method,PSNR,SSIM,LPIPS\n")
-        for method, metrics in results.items():
-            psnr = np.mean(metrics["psnr"])
-            ssim = np.mean(metrics["ssim"])
-            lpips = np.mean(metrics["lpips"])
-            f.write(f"{method},{psnr:.4f},{ssim:.4f},{lpips:.4f}\n")
+    results_file = os.path.join(OUTPUT_DIR, "results.json")
+    with open(results_file, "w") as f:
+        json.dump(results, f, indent=2)
 
-    print("\nResults saved to results.txt")
+    print(f"\nResults saved to {results_file}")
 
 
 def create_comparison_image(noisy, clean, denoised_model, denoised_bilateral, idx):
-    import matplotlib.pyplot as plt
 
     _, axes = plt.subplots(1, 4, figsize=(16, 4))
 
@@ -179,7 +190,7 @@ def create_comparison_image(noisy, clean, denoised_model, denoised_bilateral, id
     axes[3].axis("off")
 
     plt.tight_layout()
-    plt.savefig(f"/root/sigk/results/comparison_idx{idx}.png", dpi=150)
+    plt.savefig(os.path.join(OUTPUT_DIR, f"comparison_idx{idx}.png"), dpi=150)
     plt.close()
 
 
@@ -248,13 +259,12 @@ def visualize_indices(model, indices, use_train=False):
         axes[3].axis("off")
 
         plt.tight_layout()
-        plt.savefig(f"/root/sigk/results/visualize_idx{idx}.png", dpi=150)
+        plt.savefig(os.path.join(OUTPUT_DIR, f"visualize_idx{idx}.png"), dpi=150)
         plt.close()
-        print(f"  Saved to results/visualize_idx{idx}.png")
+        print(f"  Saved to output/denoising/visualize_idx{idx}.png")
 
 
 if __name__ == "__main__":
-    import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--visualize", type=int, nargs="+", default=[])
@@ -267,7 +277,7 @@ if __name__ == "__main__":
 
     if args.visualize:
         model = DenoisingModel().to(DEVICE)
-        model.load_state_dict(torch.load("/root/sigk/denoising_model.pth"))
+        model.load_state_dict(torch.load(MODEL_PATH))
         model.eval()
         visualize_indices(model, args.visualize, use_train=args.train_set)
     else:

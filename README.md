@@ -1,31 +1,29 @@
-# SIGK26 LAB1 - grupa 10 (Dawid Budzyński, Filip Budzyński)
+# SIGK26 grupa 10 (Dawid Budzyński, Filip Budzyński)
 
-Wybrane tematy: odszumianie (denoising) oraz zwiększanie rozdzielczości (upscaling)
+Wybrane tematy lab 1: odszumianie (denoising) oraz zwiększanie rozdzielczości (upscaling).
+Projekt 5: generacja animacji stickmana modelem dyfuzyjnym
+(szczegóły w [`README_stickanim.md`](README_stickanim.md)).
 
 ## Instalacja
 
 ```bash
-# Instalacja zależności przez poetry
-poetry install
+# Instalacja zależności przez uv (synchronizuje .venv z pyproject.toml + uv.lock)
+uv sync
 
-# Aktywacja środowiska
-poetry env activate
+# Aktywacja środowiska (opcjonalnie — można też uruchamiać każdy skrypt przez `uv run …`)
+source .venv/bin/activate
 ```
 
 ## Uruchomienie
 
-Każdy skrypt można uruchomić bezpośrednio używając Pythona z Poetry:
-
 ```bash
-# Lub bezpośrednio z virtualenv (jeśli poetry shell nie działa)
-poetry run python train_denoising.py
-poetry run python train_upscaling.py
+uv run python train_denoising.py
+uv run python train_upscaling.py
 
 # Ewaluacja z wizualizacją
 # argumenty oznaczają który obraz z dataset'u chcemy wizualizować
-poetry run python train_denoising.py --visualize 11 67
-poetry run python train_upscaling.py --visualize 11 22
-
+uv run python train_denoising.py --visualize 11 67
+uv run python train_upscaling.py --visualize 11 22
 ```
 
 ### 1. Odszumianie (Denoising)
@@ -89,8 +87,30 @@ Oba projekty używają tych samych metryk wymaganych w realizacji zadania:
 - **SSIM** - Structural Similarity Index Measure (`torchmetrics.functional.structural_similarity_index_measure`)
 - **LPIPS** - Learned Perceptual Image Patch Similarity (`lpips.LPIPS(net='alex')`)
 
+---
+
+### 3. Stick Animation (Projekt 5 — generacja chodu/skoku)
+
+```bash
+# 1) przygotuj dane CMU MoCap pod data/raw/{walk,jump}/*.bvh
+uv run python -m src.stick_animation.prepare_data --raw-dir data/raw --out-dir data/stickanim
+# 2) trening + ewaluacja
+uv run python train_stickanim.py --data-dir data/stickanim --epochs 400
+# 3) ablacje
+uv run python experiments_stickanim.py --data-dir data/stickanim --out-dir output/stickanim_experiments
+```
+
+Architektura: spatio-temporal Diffusion Transformer (per-joint tokens) z DCT
+branchem, cosine schedule, v-prediction, DDIM sampling, CFG, multi-objective
+loss (bone-length + smoothness + foot-skating). Pełny opis i porównanie z
+publiczną realizacją Filipa Langiewicza w `README_stickanim.md`.
+
 ## Dane
 
-Dane DIV2K powinny znaleźć się w `data/div2k/`:
+DIV2K (lab 1) — `data/div2k/`:
 - `DIV2K_train_HR/` - 800 obrazów treningowych
 - `DIV2K_valid_HR/` - 100 obrazów walidacyjnych
+
+CMU MoCap (projekt 5) — `data/raw/{walk,jump}/`:
+- pliki `.bvh` z [`una-dinosauria/cmu-mocap`](https://github.com/una-dinosauria/cmu-mocap),
+  posegregowane wg arkusza opisowego datasetu.

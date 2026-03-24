@@ -1,4 +1,6 @@
 import os
+import json
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -10,12 +12,17 @@ from torchmetrics.functional import (
 )
 import lpips
 import cv2
+import matplotlib.pyplot as plt
 
 from src.upscaling.models import UpscaleNet
 from src.upscaling.dataset import UpscaleDataset
 
-DATA_DIR = "/root/sigk/data/div2k/DIV2K_train_HR"
-TEST_DATA_DIR = "/root/sigk/data/div2k/DIV2K_valid_HR"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(SCRIPT_DIR, "data", "div2k", "DIV2K_train_HR")
+TEST_DATA_DIR = os.path.join(SCRIPT_DIR, "data", "div2k", "DIV2K_valid_HR")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output", "upscaling")
+MODEL_PATH = os.path.join(OUTPUT_DIR, "upscale_model.pth")
+
 BATCH_SIZE = 8
 NUM_EPOCHS = 50
 LEARNING_RATE = 1e-4
@@ -87,8 +94,8 @@ def train():
             f"Epoch {epoch + 1}/{NUM_EPOCHS}, Loss: {avg_loss:.6f}, LR: {scheduler.get_last_lr()[0]:.6f}"
         )
 
-    torch.save(model.state_dict(), "/root/sigk/upscale_model.pth")
-    print("Model saved to upscale_model.pth")
+    torch.save(model.state_dict(), MODEL_PATH)
+    print(f"Model saved to {MODEL_PATH}")
     return model
 
 
@@ -104,11 +111,14 @@ def evaluate(model):
     test_dataset.high_images = test_dataset.high_images[:NUM_TEST]
 
     results = {
-        "UpscaleNet": {"psnr": [], "ssim": [], "lpips": []},
-        "Bicubic": {"psnr": [], "ssim": [], "lpips": []},
+        "summary": {
+            "UpscaleNet": {"psnr": [], "ssim": [], "lpips": []},
+            "Bicubic": {"psnr": [], "ssim": [], "lpips": []},
+        },
+        "per_image": [],
     }
 
-    os.makedirs("/root/sigk/results_upscaling", exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     with torch.no_grad():
         for idx in range(len(test_dataset)):
@@ -123,18 +133,24 @@ def evaluate(model):
 
             bicubic_result = bicubic_upscale(low_np, (HIGH_RES_SIZE, HIGH_RES_SIZE))
 
-            psnr, ssim, lpips_val = compute_metrics(upscaled, high)
-            results["UpscaleNet"]["psnr"].append(psnr)
-            results["UpscaleNet"]["ssim"].append(ssim)
-            results["UpscaleNet"]["lpips"].append(lpips_val)
+            psnr_model, ssim_model, lpips_model_val = compute_metrics(upscaled, high)
+            results["summary"]["UpscaleNet"]["psnr"].append(psnr_model)
+            results["summary"]["UpscaleNet"]["ssim"].append(ssim_model)
+            results["summary"]["UpscaleNet"]["lpips"].append(lpips_model_val)
 
             bicubic_tensor = (
                 torch.from_numpy(bicubic_result).permute(2, 0, 1).float().to(DEVICE)
             )
-            psnr, ssim, lpips_val = compute_metrics(bicubic_tensor, high)
-            results["Bicubic"]["psnr"].append(psnr)
-            results["Bicubic"]["ssim"].append(ssim)
-            results["Bicubic"]["lpips"].append(lpips_val)
+            psnr_bicubic, ssim_bicubic, lpips_bicubic_val = compute_metrics(bicubic_tensor, high)
+            results["summary"]["Bicubic"]["psnr"].append(psnr_bicubic)
+            results["summary"]["Bicubic"]["ssim"].append(ssim_bicubic)
+            results["summary"]["Bicubic"]["lpips"].append(lpips_bicubic_val)
+
+            results["per_image"].append({
+                "image_idx": idx,
+                "UpscaleNet": {"psnr": psnr_model, "ssim": ssim_model, "lpips": lpips_model_val},
+                "Bicubic": {"psnr": psnr_bicubic, "ssim": ssim_bicubic, "lpips": lpips_bicubic_val},
+            })
 
             if idx < 5:
                 create_comparison_image(
@@ -151,27 +167,23 @@ def evaluate(model):
     print(f"{'Method':<20} {'PSNR':>10} {'SSIM':>10} {'LPIPS':>10}")
     print("-" * 60)
 
-    for method, metrics in results.items():
+    for method, metrics in results["summary"].items():
         psnr = np.mean(metrics["psnr"])
         ssim = np.mean(metrics["ssim"])
-        lpips = np.mean(metrics["lpips"])
-        print(f"{method:<20} {psnr:>10.4f} {ssim:>10.4f} {lpips:>10.4f}")
+        lpips_val = np.mean(metrics["lpips"])
+        print(f"{method:<20} {psnr:>10.4f} {ssim:>10.4f} {lpips_val:>10.4f}")
+        metrics["mean"] = {"psnr": psnr, "ssim": ssim, "lpips": lpips_val}
 
     print("=" * 60)
 
-    with open("/root/sigk/results_upscaling.txt", "w") as f:
-        f.write("Method,PSNR,SSIM,LPIPS\n")
-        for method, metrics in results.items():
-            psnr = np.mean(metrics["psnr"])
-            ssim = np.mean(metrics["ssim"])
-            lpips = np.mean(metrics["lpips"])
-            f.write(f"{method},{psnr:.4f},{ssim:.4f},{lpips:.4f}\n")
+    results_file = os.path.join(OUTPUT_DIR, "results.json")
+    with open(results_file, "w") as f:
+        json.dump(results, f, indent=2)
 
-    print("\nResults saved to results_upscaling.txt")
+    print(f"\nResults saved to {results_file}")
 
 
 def create_comparison_image(low, high, upscaled_model, upscaled_bicubic, idx):
-    import matplotlib.pyplot as plt
 
     _, axes = plt.subplots(1, 4, figsize=(16, 4))
 
@@ -192,7 +204,7 @@ def create_comparison_image(low, high, upscaled_model, upscaled_bicubic, idx):
     axes[3].axis("off")
 
     plt.tight_layout()
-    plt.savefig(f"/root/sigk/results_upscaling/comparison_idx{idx}.png", dpi=150)
+    plt.savefig(os.path.join(OUTPUT_DIR, f"comparison_idx{idx}.png"), dpi=150)
     plt.close()
 
 
@@ -252,13 +264,12 @@ def visualize_indices(model, indices):
         axes[3].axis("off")
 
         plt.tight_layout()
-        plt.savefig(f"/root/sigk/results_upscaling/visualize_idx{idx}.png", dpi=150)
+        plt.savefig(os.path.join(OUTPUT_DIR, f"visualize_idx{idx}.png"), dpi=150)
         plt.close()
-        print(f"  Saved to results_upscaling/visualize_idx{idx}.png")
+        print(f"  Saved to output/upscaling/visualize_idx{idx}.png")
 
 
 if __name__ == "__main__":
-    import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--visualize", type=int, nargs="+", default=[])
@@ -270,7 +281,7 @@ if __name__ == "__main__":
             channels=64,
             upscale_factor=HIGH_RES_SIZE // LOW_RES_SIZE,
         ).to(DEVICE)
-        model.load_state_dict(torch.load("/root/sigk/upscale_model.pth"))
+        model.load_state_dict(torch.load(MODEL_PATH))
         model.eval()
         visualize_indices(model, args.visualize)
     else:
