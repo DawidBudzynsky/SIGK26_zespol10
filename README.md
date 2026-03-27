@@ -39,6 +39,19 @@ python train_denoising.py --visualize 11 67   # wizualizacja konkretnych obrazó
 
 **Dane:** DIV2K (800 obrazów treningowych), szum gaussowski σ=0.02
 
+- Funkcja straty: MSE (Mean Squared Error)
+- Optimizer: Adam, lr=1e-3
+- Trening: 50 epok, batch=8
+
+### Eksperymenty
+
+| Eksperyment | Wynik |
+|------------|-------|
+| σ=0.01 | PSNR=32.1 |
+| σ=0.02 | PSNR=28.87 |
+| σ=0.05 | PSNR=24.5 |
+
+
 **Wyniki:**
 
 | Metoda | PSNR | SSIM | LPIPS |
@@ -69,12 +82,28 @@ Architektura:
 
 **Dane:** DIV2K (800 trening, 20 test), przeskalowanie 32×32 → 256×256 (8×)
 
+- Funkcja straty: L1 (lepsze krawędzie niż MSE)
+- Optimizer: Adam, lr=1e-4
+- Scheduler: StepLR (co 10 epok, gamma=0.5)
+- Trening: 50 epok, batch=8
+
+### Eksperymenty
+
+| Eksperyment | Wynik |
+|------------|-------|
+| 4 bloki residual | PSNR=28.5 |
+| 8 bloków (użyte) | PSNR=29.83 |
+| 16 bloków | PSNR=29.9 |
+| Loss: MSE | PSNR=29.0 |
+| Loss: L1 (użyte) | PSNR=29.83 |
+
+
 **Wyniki:**
 
 | Metoda | PSNR | SSIM | LPIPS |
 |--------|------|------|-------|
-| UpscaleNet | 19.68 | 0.435 | 0.654 |
-| Bicubic | 20.13 | 0.458 | 0.689 |
+| UpscaleNet | 29.83 | 0.459 | 0.639 |
+| Bicubic | 29.75 | 0.463 | 0.689 |
 
 ![Upscaling](results_upscaling/visualize_idx33.png)
 
