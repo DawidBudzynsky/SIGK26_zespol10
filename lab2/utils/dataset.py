@@ -14,8 +14,9 @@ class HDREyeDataset(Dataset):
         self.target_ev = target_ev
         self.transform = transform
         
-        self.ldr_dir = self.data_dir / 'Bracketed images' / 'LDR'
-        self.hdr_dir = self.data_dir / 'Bracketed images' / 'HDR'
+        self.bracketed_dir = self.data_dir / 'images' / 'Bracketed_images'
+        self.hdr_dir = self.data_dir / 'images' / 'HDR'
+        self.ldr_dir = self.data_dir / 'images' / 'LDR'
         
         self.test_scenes = ['C40', 'C41', 'C42', 'C43', 'C44', 'C45', 'C46']
         
@@ -26,19 +27,19 @@ class HDREyeDataset(Dataset):
     
     def _get_train_samples(self):
         samples = []
-        for scene_dir in self.ldr_dir.iterdir():
+        for scene_dir in self.bracketed_dir.iterdir():
             if scene_dir.is_dir() and scene_dir.name not in self.test_scenes:
-                for ldr_file in sorted(scene_dir.glob('*.jpg')):
+                for ldr_file in sorted(scene_dir.glob('*.JPG')):
                     samples.append((ldr_file, None))
         return samples
     
     def _get_test_samples(self):
         samples = []
         for scene in self.test_scenes:
-            scene_path = self.ldr_dir / scene
+            scene_path = self.bracketed_dir / scene
             if scene_path.exists():
-                for ldr_file in sorted(scene_path.glob('*.jpg')):
-                    hdr_path = self.hdr_dir / f"{scene}.hdr"
+                for ldr_file in sorted(scene_path.glob('*.JPG')):
+                    hdr_path = self.hdr_dir / f"{scene}_HDR.hdr"
                     samples.append((ldr_file, hdr_path))
         return samples
     

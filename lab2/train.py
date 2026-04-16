@@ -9,7 +9,6 @@ from tqdm import tqdm
 from models.exposure_synthesizer import ExposureSynthesizer
 from utils.dataset import HDREyeDataset
 from utils.hdr import apply_exposure_adjustment
-from utils.metrics import compute_psnr
 
 
 def create_exposure_targets(ldr_tensor: torch.Tensor, ev: float = 2.7):
@@ -74,10 +73,12 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, required=True, help='Path to HDR-Eye dataset')
     parser.add_argument('--output', type=str, default='models/exposure_model.pt')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=1)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--ev', type=float, default=2.7, help='Exposure value for synthesis')
     args = parser.parse_args()
     
     Path('checkpoints').mkdir(exist_ok=True)
+    
+    torch.set_num_threads(1)
     main(args)
