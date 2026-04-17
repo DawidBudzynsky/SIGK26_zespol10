@@ -17,7 +17,6 @@ from utils.hdr import (
     tone_map_reinhard,
 )
 
-TEST_SCENES = ['C40', 'C41', 'C42', 'C43', 'C44', 'C45', 'C46']
 IMG_SIZE = (512, 512)
 
 
@@ -109,58 +108,146 @@ def compute_metrics(gt_hdr_rgb: np.ndarray, pred_hdr_rgb: np.ndarray) -> dict:
     }
 
 
-def save_side_by_side(scene: str, gt_hdr: np.ndarray, pred_hdr: np.ndarray,
-                       under: np.ndarray, base: np.ndarray, over: np.ndarray,
-                       out_dir: Path) -> None:
+def add_label(img: np.ndarray, text: str, position: str = 'bottom-left') -> np.ndarray:
+    h, w = img.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.55
+    thickness = 1
+    
+    (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    
+    if position == 'bottom-left':
+        x, y = 8, h - 8
+        bg_x1, bg_y1 = 3, h - text_h - baseline - 10
+        bg_x2, bg_y2 = text_w + 15, h + 2
+    elif position == 'top-center':
+        x, y = w // 2 - text_w // 2, text_h + 8
+        bg_x1, bg_y1 = w // 2 - text_w // 2 - 6, 3
+        bg_x2, bg_y2 = w // 2 + text_w // 2 + 6, text_h + baseline + 10
+    
+    overlay = img.copy()
+    cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, img, 0.4, 0, img)
+    cv2.putText(img, text, (x, y), font, font_scale, (255, 255, 255), thickness)
+    return img
+
+
+def save_comparison(scene: str, 
+                    orig_images: list[tuple[np.ndarray, str, float]], 
+                    gt_hdr: np.ndarray, 
+                    gt_hdr_dr: float,
+                    synth_under: np.ndarray,
+                    synth_over: np.ndarray,
+                    base_rgb: np.ndarray,
+                    pred_hdr: np.ndarray,
+                    pred_hdr_dr: float,
+                    out_dir: Path) -> None:
     gt_tm = tonemap_reinhard_u8(gt_hdr)
     pred_tm = tonemap_reinhard_u8(pred_hdr)
-
-    top = np.concatenate([under, base, over], axis=1)
-    bottom = np.concatenate([gt_tm, pred_tm, np.zeros_like(pred_tm)], axis=1)
-    montage = np.concatenate([top, bottom], axis=0)
+    
+    h, w = orig_images[0][0].shape[:2]
+    
+    labeled_imgs = []
+    for img, label, exp_time in orig_images:
+        labeled = add_label(img.copy(), f"{label} (EV: {exp_time:.5f}s)")
+        labeled_imgs.append(labeled)
+    
+    orig_under, orig_base, orig_over = labeled_imgs
+    synth_under_labeled = add_label(synth_under.copy(), "Synthesized Under-exposure")
+    synth_over_labeled = add_label(synth_over.copy(), "Synthesized Over-exposure")
+    base_labeled = add_label(base_rgb.copy(), f"Base Image (EV: {orig_images[1][2]:.5f}s)")
+    gt_labeled = add_label(gt_tm.copy(), f"GT HDR - DR: {gt_hdr_dr:.2f} EV")
+    pred_labeled = add_label(pred_tm.copy(), f"Model HDR - DR: {pred_hdr_dr:.2f} EV")
+    
+    top_row = np.concatenate([orig_under, orig_base, orig_over], axis=1)
+    
+    middle_row = np.concatenate([synth_under_labeled, base_labeled, synth_over_labeled], axis=1)
+    
+    bottom_row = np.concatenate([gt_labeled, pred_labeled, np.zeros_like(pred_tm)], axis=1)
+    
+    montage = np.concatenate([top_row, middle_row, bottom_row], axis=0)
     montage_bgr = cv2.cvtColor(montage, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(str(out_dir / f'{scene}_merge_compare.png'), montage_bgr)
-
+    cv2.imwrite(str(out_dir / f'{scene}_comparison.png'), montage_bgr)
+    
+    gt_bgr = cv2.cvtColor(gt_hdr, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(str(out_dir / f'{scene}_gt.hdr'), gt_bgr)
+    
     pred_bgr = cv2.cvtColor(pred_hdr, cv2.COLOR_RGB2BGR)
     cv2.imwrite(str(out_dir / f'{scene}_pred.hdr'), pred_bgr)
 
 
-def process_scene(scene: str, bracketed_dir: Path, hdr_dir: Path,
-                   model, device, ev: float, out_dir: Path) -> dict | None:
-    scene_path = bracketed_dir / scene
+def load_original_bracketed(scene_path: Path, size=IMG_SIZE) -> list[tuple[np.ndarray, str, float]]:
     ldr_files = sorted(scene_path.glob('*.JPG*'))
     if not ldr_files:
-        print(f'[{scene}] brak plikow LDR, pomijam')
+        return []
+    
+    images_with_exposure = []
+    for f in ldr_files:
+        try:
+            exif = get_exif(str(f))
+            exp_time = read_exposure_time(exif)
+            img = load_ldr_rgb(f, size=size)
+            images_with_exposure.append((img, f.stem, exp_time))
+        except Exception:
+            continue
+    
+    return images_with_exposure
+
+
+def select_under_base_over(images_with_exp: list[tuple[np.ndarray, str, float]]) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    if len(images_with_exp) < 3:
+        raise ValueError(f"Need at least 3 bracketed images, got {len(images_with_exp)}")
+    
+    sorted_imgs = sorted(images_with_exp, key=lambda x: x[2])
+    under_img, under_name, under_exp = sorted_imgs[0]
+    base_img, base_name, base_exp = sorted_imgs[len(sorted_imgs) // 2]
+    over_img, over_name, over_exp = sorted_imgs[-1]
+    
+    return under_img, base_img, over_img, under_exp, base_exp, over_exp
+
+
+def process_scene(scene: str, bracketed_dir: Path, 
+                   model, device, ev: float, out_dir: Path) -> dict | None:
+    scene_path = bracketed_dir / scene
+    if not scene_path.exists():
+        print(f'[{scene}] katalog nie istnieje, pomijam')
         return None
-
-    base_file = ldr_files[len(ldr_files) // 2]
-    try:
-        exif = get_exif(str(base_file))
-        t_base = read_exposure_time(exif)
-    except Exception as e:
-        print(f'[{scene}] brak EXIF ({e}), pomijam')
+    
+    orig_images = load_original_bracketed(scene_path)
+    if len(orig_images) < 3:
+        print(f'[{scene}] za malo obrazow (need 3, got {len(orig_images)}), pomijam')
         return None
-
-    base_rgb = load_ldr_rgb(base_file)
-    under_rgb, over_rgb = synth_under_over(model, base_rgb, device)
-
+    
+    under_rgb, base_rgb, over_rgb, under_exp, base_exp, over_exp = select_under_base_over(orig_images)
+    
+    orig_times = np.array([under_exp, base_exp, over_exp], dtype=np.float32)
+    gt_hdr = merge_debevec_rgb([under_rgb, base_rgb, over_rgb], orig_times)
+    
+    synth_under, synth_over = synth_under_over(model, base_rgb, device)
+    
     factor = 2.0 ** ev
-    times = np.array([t_base / factor, t_base, t_base * factor], dtype=np.float32)
-
-    pred_hdr = merge_debevec_rgb([under_rgb, base_rgb, over_rgb], times)
-
-    gt_path = find_hdr_file(hdr_dir, scene)
-    if gt_path is None:
-        print(f'[{scene}] brak pliku HDR, pomijam porownanie')
-        return None
-    gt_hdr = load_hdr_rgb(gt_path)
-
+    synth_times = np.array([base_exp / factor, base_exp, base_exp * factor], dtype=np.float32)
+    pred_hdr = merge_debevec_rgb([synth_under, base_rgb, synth_over], synth_times)
+    
+    gt_hdr_dr = float(measure_ev_range(gt_hdr))
+    pred_hdr_dr = float(measure_ev_range(pred_hdr))
+    
+    orig_labels = [
+        (under_rgb, "Original Under", under_exp),
+        (base_rgb, "Original Base", base_exp),
+        (over_rgb, "Original Over", over_exp)
+    ]
+    
     metrics = compute_metrics(gt_hdr, pred_hdr)
     metrics['scene'] = scene
-    metrics['base_frame'] = base_file.name
-    metrics['base_exposure_s'] = float(t_base)
-
-    save_side_by_side(scene, gt_hdr, pred_hdr, under_rgb, base_rgb, over_rgb, out_dir)
+    metrics['base_exposure_s'] = float(base_exp)
+    metrics['dynamic_range_gt_ev'] = gt_hdr_dr
+    metrics['dynamic_range_pred_ev'] = pred_hdr_dr
+    
+    save_comparison(scene, orig_labels, gt_hdr, gt_hdr_dr,
+                    synth_under, synth_over, base_rgb, 
+                    pred_hdr, pred_hdr_dr, out_dir)
+    
     return metrics
 
 
@@ -193,6 +280,17 @@ def print_table(rows: list[dict]) -> None:
     print(' '.join(fmt))
 
 
+def get_all_scenes(bracketed_dir: Path) -> list[str]:
+    all_entries = sorted(bracketed_dir.iterdir())
+    scenes = []
+    for entry in all_entries:
+        if entry.is_dir() and not entry.name.startswith('.'):
+            ldr_files = list(entry.glob('*.JPG*'))
+            if ldr_files:
+                scenes.append(entry.name)
+    return scenes
+
+
 def main(args):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f'Using device: {device}')
@@ -204,19 +302,27 @@ def main(args):
 
     data_dir = Path(args.data_dir)
     bracketed_dir = data_dir / 'images' / 'Bracketed_images'
-    hdr_dir = data_dir / 'images' / 'HDR'
+
+    all_scenes = get_all_scenes(bracketed_dir)
+    print(f'Znaleziono {len(all_scenes)} scen z bracketed images: {all_scenes}')
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    for scene in tqdm(TEST_SCENES, desc='Scenes'):
-        res = process_scene(scene, bracketed_dir, hdr_dir, model,
+    skipped = []
+    for scene in tqdm(all_scenes, desc='Scenes'):
+        res = process_scene(scene, bracketed_dir, model,
                              device, args.ev, out_dir)
         if res is not None:
             rows.append(res)
+        else:
+            skipped.append(scene)
 
-    print('\n=== HDR Reconstruction vs. Ground Truth ===')
+    print(f'\n=== GT HDR (from originals) vs Model HDR (from synthetics) ===')
+    print(f'Przetworzono: {len(rows)}/{len(all_scenes)} scen')
+    if skipped:
+        print(f'Pominieto: {skipped}')
     print_table(rows)
 
     with open(out_dir / 'metrics.json', 'w') as f:
@@ -226,12 +332,13 @@ def main(args):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='Porownanie HDR z oryginalow vs HDR z syntezy modelu')
     parser.add_argument('--data_dir', type=str, required=True,
-                        help='Katalog HDR-Eye (z images/Bracketed_images i images/HDR)')
+                        help='Katalog HDR-Eye (z images/Bracketed_images)')
     parser.add_argument('--model_path', type=str, required=True,
                         help='Plik .pt z wagami ExposureSynthesizer')
-    parser.add_argument('--output_dir', type=str, default='results/merge_compare')
+    parser.add_argument('--output_dir', type=str, default='results/merge_compare',
+                        help='Katalog wyjsciowy')
     parser.add_argument('--ev', type=float, default=2.7,
                         help='EV uzyte do treningu (domyslnie 2.7)')
     args = parser.parse_args()

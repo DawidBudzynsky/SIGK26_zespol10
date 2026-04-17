@@ -207,3 +207,23 @@ Wykorzystano technikę symetrii lustrzanej w celu zwiększenia zbioru danych tre
 ## Uwagi
 
 - Model trenowany na 14 scenach z poprawnym EXIF, bez przecieku danych train/test
+
+---
+
+## Porownanie koncowe: GT HDR vs Modele
+
+### Wizualizacja
+
+![Final Comparison](results/compare/final_comparison.png)
+
+### Wyniki
+
+| Scena | GT DR [EV] | Model PSNR | Model DR [EV] | +Synth PSNR | +Synth DR [EV] |
+|-------|------------|-----------|--------------|-------------|----------------|
+| C40 | 20.27 | 13.79 | 7.82 | 12.61 | 7.98 |
+| C41 | 18.00 | 9.59 | 7.99 | 9.26 | 7.78 |
+| C43 | 24.30 | 11.21 | 7.33 | 10.74 | 7.99 |
+
+Model z danymi syntetycznymi zachowuje szerszy DR.
+
+---
