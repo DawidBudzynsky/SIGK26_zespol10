@@ -20,7 +20,7 @@ def create_hdr_debevec(images, exposure_times):
 
 def load_exposure_times(ldr_dir, scene):
     exposures = []
-    image_files = sorted(ldr_dir / scene.glob('*.jpg'))
+    image_files = sorted(ldr_dir / scene.glob('*.JPG*'))
     for img_path in image_files:
         exif = get_exif(str(img_path))
         exposures.append(read_exposure_time(exif))
@@ -29,7 +29,7 @@ def load_exposure_times(ldr_dir, scene):
 
 def load_ldr_images(ldr_dir, scene):
     images = []
-    image_files = sorted(ldr_dir / scene.glob('*.jpg'))
+    image_files = sorted(ldr_dir / scene.glob('*.JPG*'))
     for img_path in image_files:
         img = cv2.imread(str(img_path))
         images.append(img)
@@ -93,7 +93,7 @@ def evaluate_hdr_reconstruction(model, test_dataset, device, ldr_dir):
     for scene in tqdm(test_scenes, desc="HDR Reconstruction"):
         scene_path = ldr_dir / scene
         
-        ldr_files = sorted(scene_path.glob('*.jpg'))
+        ldr_files = sorted(scene_path.glob('*.JPG*'))
         
         original_hdr_path = test_dataset.hdr_dir / f"{scene}.hdr"
         if original_hdr_path.exists():
@@ -152,7 +152,7 @@ def main(args):
     )
     
     hdr_results = evaluate_hdr_reconstruction(
-        model, test_dataset, device, test_dataset.ldr_dir
+        model, test_dataset, device, test_dataset.bracketed_dir
     )
     
     print_results(synthesis_results, hdr_results)
