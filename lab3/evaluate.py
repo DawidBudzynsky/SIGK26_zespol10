@@ -13,7 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
@@ -24,13 +24,42 @@ from utils.dataset import PhongDataset
 from utils.metrics import all_metrics, to_uint8
 
 
-def make_montage(pairs, path, max_rows=8):
-    """pairs is a list of (gt_uint8, pred_uint8) — vertically stacked rows."""
+def make_montage(pairs, path, max_rows=8, scale=2, diff_gain=4):
+    """Build a 3-column montage (GT | Pred | |GT-Pred|×diff_gain) with row
+    labels marking 'TYPICAL' (top half) vs 'HARD' (bottom half).
+    """
     rows = []
-    for gt, pred in pairs[:max_rows]:
-        diff = np.abs(gt.astype(np.int16) - pred.astype(np.int16)).astype(np.uint8)
-        rows.append(np.concatenate([gt, pred, diff], axis=1))
-    canvas = np.concatenate(rows, axis=0)
+    n = min(max_rows, len(pairs))
+    half = n // 2
+    for i, (gt, pred) in enumerate(pairs[:n]):
+        diff = np.abs(gt.astype(np.int16) - pred.astype(np.int16)) * diff_gain
+        diff = diff.clip(0, 255).astype(np.uint8)
+        row = np.concatenate([gt, pred, diff], axis=1)
+        row_pil = Image.fromarray(row).resize(
+            (row.shape[1] * scale, row.shape[0] * scale), Image.NEAREST,
+        )
+        rows.append(np.array(row_pil))
+
+    body = np.concatenate(rows, axis=0)
+    h, w = body.shape[:2]
+    cell = w // 3
+
+    # Header with column labels
+    header = Image.new("RGB", (w + 80, 28), (32, 32, 32))
+    d = ImageDraw.Draw(header)
+    d.text((80 + cell // 2 - 8, 7),                  "GT",                       fill=(255, 255, 255))
+    d.text((80 + cell + cell // 2 - 16, 7),          "Pred",                     fill=(255, 255, 255))
+    d.text((80 + 2 * cell + cell // 2 - 50, 7),      f"|GT - Pred|  (x{diff_gain})", fill=(255, 200, 200))
+
+    # Side-strip with row-group labels
+    side = Image.new("RGB", (80, h), (32, 32, 32))
+    d = ImageDraw.Draw(side)
+    cell_h = h // n
+    d.text((4, half * cell_h // 2 - 6),                                   "TYPICAL", fill=(180, 220, 255))
+    d.text((4, half * cell_h + (n - half) * cell_h // 2 - 6),             "HARD",    fill=(255, 200, 180))
+
+    body_with_side = np.concatenate([np.array(side), body], axis=1)
+    canvas = np.concatenate([np.array(header), body_with_side], axis=0)
     Image.fromarray(canvas).save(path)
 
 
@@ -60,7 +89,7 @@ def main():
     loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False)
 
     rows = []
-    montage_pairs = []
+    montage_candidates = []   # (FLIP, brightness, gt, pred)
     pbar = tqdm(total=len(test_ds), desc="evaluating")
     with torch.no_grad():
         for params, real in loader:
@@ -72,10 +101,21 @@ def main():
                 gt = to_uint8(real[i])
                 m = all_metrics(pred, gt, device=str(device))
                 rows.append(m)
-                if len(montage_pairs) < args.montage:
-                    montage_pairs.append((gt, pred))
+                montage_candidates.append((m["FLIP"], float(gt.mean()), gt, pred))
                 pbar.update(1)
     pbar.close()
+
+    # Build a montage that shows both modes honestly:
+    #   * top half: best half of test (low FLIP) — the model's typical accurate mode
+    #   * bottom half: worst quarter — the failure cases (close-ups, off-position)
+    montage_candidates.sort(key=lambda x: x[0])
+    n_show = args.montage
+    half = n_show // 2
+    n = len(montage_candidates)
+    good_pos = np.linspace(0, n // 2, half).astype(int)
+    bad_pos = np.linspace(int(n * 0.75), n - 1, n_show - half).astype(int)
+    montage_pairs = [(montage_candidates[p][2], montage_candidates[p][3])
+                     for p in list(good_pos) + list(bad_pos)]
 
     # Aggregate
     keys = ["FLIP", "LPIPS", "SSIM", "Hausdorff"]

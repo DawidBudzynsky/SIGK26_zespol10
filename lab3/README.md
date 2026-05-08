@@ -146,11 +146,21 @@ Wartości pochodzą z `lab3/results/metrics_summary.md` (uruchamiane przez
 
 ## Wyniki wizualne
 
-### Predykcja vs GT (8 typowych próbek z testu)
+### Predykcja vs GT (8 próbek z testu — typowe + trudne)
 
-Lewy: GT, środek: predykcja generatora (cGAN+L1), prawy: różnica (×4 dla widoczności).
+Lewy: GT, środek: predykcja generatora (cGAN+L1), prawy: różnica `|GT − Pred|`
+**przemnożona ×4** dla widoczności (predykcje są zwykle bardzo bliskie GT, więc
+surowa różnica byłaby prawie czarna). Górne 4 wiersze: próbki z najniższym
+błędem FLIP; dolne 4: próbki z najwyższym FLIP — pokazują tryby porażki.
 
 ![montage](results/qualitative_montage.png)
+
+**Tryby porażki widoczne w sekcji HARD:**
+- przesunięcie/przyciemnienie highlightu (predykcja ma kulę w prawie tym samym
+  miejscu, ale o niższej luminancji),
+- kolorowy szum wokół poprawnej pozycji,
+- chaotyczne wzory na rzadkich, **bardzo bliskich** kulach (większych niż 30%
+  kadru) — w treningu jest ich znikomo mało.
 
 ### Skrajne przypadki (best / median / worst per metryka)
 
