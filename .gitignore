@@ -24,3 +24,6 @@ build/
 
 # Cache
 .ruff_cache/
+
+# Windows NTFS Mark-of-the-Web (alternate data streams kopiowane do WSL)
+*:Zone.Identifier
