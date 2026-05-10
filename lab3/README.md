@@ -2,23 +2,16 @@
 
 **Autorzy:** Dawid Budzyński, Filip Budzyński (grupa 10)
 
-Sieć typu **conditional GAN** (pix2pix-style), która z 15-wymiarowego wektora
-parametrów sceny generuje 128×128 obraz kuli oświetlonej modelem Phonga.
+Sieć neuronowa, która z wektora parametrów sceny generuje 128×128 obraz
+kuli oświetlonej modelem Phonga. 
 
 ---
 
 ## Instalacja
 
 ```bash
-poetry install -C lab3                # dependencies (torch, lpips, flip-evaluator, moderngl, ...)
+poetry install -C lab3
 poetry env activate
-```
-
-W repozytorium używamy też istniejącego `.venv`:
-
-```bash
-source .venv/bin/activate
-python -m pip install moderngl PyWavefront pyrr lpips flip-evaluator
 ```
 
 ---
@@ -26,269 +19,207 @@ python -m pip install moderngl PyWavefront pyrr lpips flip-evaluator
 ## Uruchomienie
 
 ```bash
-# 1. Wygeneruj zbiór 3000 obrazów 128×128 z dostarczonego renderera
-python lab3/generate_dataset.py --out lab3/data --n 3000
+python lab3/generate_dataset.py --n 3000 --out lab3/data
 
-# 2. Trenuj główny model (cGAN + L1)
-python lab3/train.py --epochs 80 --batch_size 64
+# Trening: cGAN
+python lab3/train.py --epochs 25 --batch_size 32 --out lab3/checkpoints/cgan.pt
 
-# 3. Ewaluacja na 600 obrazach testowych (FLIP/LPIPS/SSIM/Hausdorff)
-python lab3/evaluate.py
-```
+# Trening: bez członu GAN (lambda L1 = 50, ważona MSE)
+python lab3/train.py --no_gan --epochs 20 --lambda_l1 50 --out lab3/checkpoints/l1_only.pt
 
-Eksperymenty pomocnicze:
+# Ewaluacja
+python lab3/evaluate.py --ckpt lab3/checkpoints/l1_only.pt --out_dir lab3/results
 
-```bash
-# L1-only (bez członu adwersarialnego)
-python lab3/train.py --epochs 80 --no_gan --out lab3/checkpoints/l1_only.pt
-python lab3/evaluate.py --ckpt lab3/checkpoints/l1_only.pt --out_dir lab3/results/l1_only
-
-# Kodowanie absolutne pozycji (zamiast względem kamery)
-python lab3/train.py --epochs 80 --encoding absolute --out lab3/checkpoints/abs_encoding.pt
-python lab3/evaluate.py --ckpt lab3/checkpoints/abs_encoding.pt --out_dir lab3/results/abs_encoding
-
-# Analiza dystrybucji metryk + porównanie modeli
-python lab3/scripts/analyze_metrics.py
-python lab3/scripts/compare_models.py
 ```
 
 ---
 
-## Generacja zbioru danych
+## Zbiór danych
 
-Korzystamy z **dostarczonego renderera** (`SIGK___Projekt_3/resources/shaders/phong/`,
-`sphere.obj`) tylko offscreenowo: tworzymy `moderngl.create_standalone_context()`
-i renderujemy do FBO 128×128 dokładnie tym samym kodem GLSL co aplikacja
-okienkowa. Stałe `material_ambient=[76,76,76]/255`, `light_ambient=[25,25,25]/255`,
-`material_specular=light_specular=light_diffuse=[255,255,255]/255` — zgodnie ze
-specyfikacją.
+Korzystamy z **dostarczonego renderera Phonga**
 
-Losowane parametry per scena (sec. 2.3 specyfikacji):
+Parametry sceny:
 
-| Parametr             | Zakres            |
-|----------------------|-------------------|
-| obj_pos (xyz)        | `[-20, 20]³`      |
-| diffuse (rgb)        | `[0, 255]³`       |
-| shininess            | `[3, 20]`         |
-| light_pos (xyz)      | `[-20, 20]³`      |
-| kamera (stała)       | `(5, 5, 15)`, FOV 45°, lookAt = (0,0,0) |
+| Parametr             | Rozkład / wartość                              |
+|----------------------|------------------------------------------------|
+| `obj_pos`            | `U(-20, 20)` na każdą oś                       |
+| `diffuse`            | `U(0, 255)` na każdy z RGB                     |
+| `shininess`          | `U(3, 20)`                                     |
+| `light_pos`          | `U(-20, 20)` na każdą oś                       |
+| materiał `ka` / `ks` | `[76, 76, 76]` / `[255, 255, 255]` (stałe w shaderze) |
+| światło `Ia/Id/Is`   | `[25, 25, 25]` / `[255, 255, 255]` / `[255, 255, 255]` |
+| kamera               | `(5, 5, 15)`, FOV 45°, lookAt `(0, 0, 0)`      |
+| rozmiar / N          | 128×128, **3000 obrazów** (2400 train / 600 test) |
 
-### Kluczowy problem (wskazówka #2 spec)
+![Przegląd zbioru](results/dataset_preview.png)
 
-Z `[-20, 20]³` znaczna część losowanych pozycji **całkowicie wypada poza kadr** —
-kula jest za kamerą lub poza frustum. Pierwsze 12 prób w naïvnej wersji dało 11
-zupełnie czarnych obrazów. Rozwiązanie: **rejection sampling** w
-`is_visible()` — projektujemy środek kuli do clip-space i akceptujemy jeśli
-NDC.x, NDC.y ∈ [-0.85, 0.85] i głębokość kamery w [3, 30]. Zostaje rozproszenie
-po pozycji w obrazie (kula nie zawsze pośrodku — wskazówka #3) bez czarnych
-przykładów.
+### Odpowiedzi na pytania
 
-### Kodowanie wejściowe (wskazówka #1 spec)
+**1. Czy parametry zapisać inaczej niż wprost?**
+Tak, kamera jest stała, więc absolutne `obj_pos` zmusiłoby sieć do nauki
+stałej transformacji widoku. Kodujemy obie pozycje relatywnie do kamery,
+normalizujemy do ~[-1, 1]:
 
-Pozycje są kodowane **względem kamery** (a nie w światowym układzie):
-`(obj_pos - cam) / 30`. Dodatkowo dodajemy odległość do kamery oraz `sin/cos`
-azymutu i elewacji obiektu. Dzięki temu generator nie musi się uczyć stałej
-transformacji widoku — uczy się tylko shadingu w przestrzeni ekranu.
+```
+[0:3]   (obj_pos   - camera) / 25
+[3:6]   (light_pos - camera) / 25
+[6:9]   diffuse / 255
+[9]     (shininess - 3) / 17
+```
 
-Łącznie: 15-wymiarowy wektor (3 obj_rel + 3 light_rel + 3 RGB + 1 shininess +
-1 dist + 2 azymut + 2 elewacja).
+10-wymiarowy wektor, bez paddingu.
+
+**2. Jakiej sytuacji nie wyklucza zakres `[-20, 20]^3`?**
+Sporo próbek wpada za kamerę (w > kilkudziesięciu) wynik to czarny obraz. 
+fix - rejection sampling:
+środek kuli rzutowany do clip-space musi spełniać `|NDC.x|, |NDC.y| < 1.05`.
+Margines celowo dopuszcza kulę częściowo poza kadrem.
+
+**3, 4. Pozycja kuli i jej losowanie.** `sample_scene()` losuje wszystkie
+parametry per scena; rejection sampling jedynie odfiltrowywuje przypadki.
 
 ---
 
-## Architektura modelu
+## Architektura
 
-**Generator** (`models/neural_renderer.py:Generator`)
+Zatrzymaliśmy się na per-pixel rendererze, generator nie buduje obrazu przez
+upsamplowanie z małej rozdzielczości, tylko przetwarza pełnowymiarowe
+(128×128) mapy, w których każdy piksel ma dostęp do swoich znormalizowanych
+współrzędnych (x, y) i 10-wymiarowego wektora parametrów sceny.
+
+### Generator
 
 ```
-params(15) → MLP → 4×4×512 → 5× (ConvTranspose 4, stride 2 + BN + ReLU)
-                                       → 8 → 16 → 32 → 64 → 128
-            → Conv 3×3 → Sigmoid → 3×128×128
+input: params (B, 10)
+
+# 1. Każdy piksel zna swoje (x_norm, y_norm) ∈ [-1, 1]
+coord_grid = (B, 2, 128, 128)            # x, y rozgłoszone
+param_map  = params -> (B, 10, 128, 128) # parametry rozgłoszone
+
+# 2. Per-pixel MLP (1x1 conv): 12 -> 192 -> 192 -> 96
+pixel_mlp
+
+# 3. Spatial refinement: 3 x [Conv 3x3, InstanceNorm, ReLU] (96 ch)
+refine
+
+# 4. RGB head: Conv3x3 -> 48 ch -> Conv 1x1 -> 3 ch -> Sigmoid
 ```
 
-**Discriminator** — PatchGAN 70×70 z **conditioningiem** na parametrach (rozszerzamy
-wektor parametrów do mapy stałej i konkatenujemy z obrazem). Dyskryminator ocenia
-"czy ten obraz pasuje **do tych parametrów**", a nie tylko "czy to dowolny Phong".
+Każdy piksel niezależnie decyduje, czy "mieści się" w rzucie kuli i jaki ma kolor; konwolucje 3×3 dodają spójność
+przestrzenną (krawędzie, gładki gradient cieniowania).
 
-**Funkcja straty:**
+### Discriminator (PatchGAN, używany tylko w wariancie cGAN)
+
 ```
-L_G = L_GAN(D(G(x), x), 1) + λ * L1(G(x), y)
-L_D = ½(BCE(D(y, x), 1) + BCE(D(G(x), x), 0))
+[image (3) || tile(params) (10)]   -> 13 kanałów
+  -> Conv 4x4 s2 -> 64    (128 -> 64)
+  -> Conv 4x4 s2 -> 128   (64 -> 32)
+  -> Conv 4x4 s2 -> 256   (32 -> 16)
+  -> Conv 4x4 s1 -> 512   (16 -> 15)
+  -> Conv 4x4 s1 -> 1     (15 -> 14)
 ```
-gdzie λ = 100, optimizer Adam(2e-4, β=(0.5, 0.999)), 80 epok, batch 64. Trening
-~22 minut na pojedynczym GPU.
+
+### Loss / Optymalizator
+
+Strata rekonstrukcji to MSE ważona maską obiektu, bez tego sieć utyka
+w lokalnym minimum "wszystko czarne" (mean(GT) ≈ 0.013, więc nie-warunkowy
+'all black' osiąga L1 ≈ 0.013 i nie potrafi się stamtąd ruszyć):
+
+```python
+mask = (real > 0.05).float()              # piksele kuli
+w    = 1.0 + 9.0 * mask                   # 10x na sferze, 1x na tle
+loss_recon = (w * (fake - real)**2).mean()
+
+L_G = BCE(D(fake, p), 1) + lambda * loss_recon
+L_D = 0.5 * (BCE(D(real, p), 0.9) + BCE(D(fake, p), 0))   # one-sided smoothing
+```
+
+`lambda = 50`, Adam(`lr=2e-4`, `betas=(0.5, 0.999)`), batch 32, podział
+2400/600 z `seed=0`.
+
+![Strata G/D/L1](results/loss_curves.png)
 
 ---
 
-## Wyniki — tabela główna
+## Wyniki
 
-Ewaluacja na 600 obrazach testowych (20% zbioru). Niższe lepsze dla
-FLIP/LPIPS/Hausdorff, wyższe lepsze dla SSIM:
+Główny model (`l1_only.pt`, 10 epok, λ_recon=50, no_gan). Drugi wiersz to
+wariant z włączonym członem adwersarialnym (cGAN, 10 epok, λ_recon=50).
 
-| Metoda                      | FLIP ↓   | LPIPS ↓  | SSIM ↑   | Hausdorff ↓ |
-|-----------------------------|----------|----------|----------|-------------|
-| **neural_renderer (cGAN, relatywne)** | 0.0612   | 0.2677   | 0.9574   | 89.22       |
-| L1-only (bez adwersaria)    | 0.0273   | 0.2142   | 0.9748   | 174.65      |
-| cGAN, encoding absolutny    | 0.0663   | 0.2207   | 0.9555   | 61.91       |
+| Metoda | FLIP | LPIPS | SSIM | Hausdorff |
+|--------|------|-------|------|-----------|
+| **neural_renderer** (per-pixel, no_gan) | 0.9538 | **0.2224** | 0.2981 | 180.48 |
+| neural_renderer + cGAN  (collapsed)    | **0.0520** | 0.2368 | **0.9594** |  **75.22** |
 
-Wartości pochodzą z `lab3/results/metrics_summary.md` (uruchamiane przez
-`evaluate.py`).
+Liczby pochodzą z `lab3/results/metrics_summary.md` oraz
+`lab3/results/cgan_collapsed/metrics_summary.md`.
 
-### Per-metryka percentyle (cGAN, 600 testów)
+### Wizualizacja jakościowa (`l1_only`)
 
-| Metryka  | min    | p10    | p50    | p90    | max    |
-|----------|--------|--------|--------|--------|--------|
-| FLIP     | 0.0246 | 0.0345 | 0.0412 | 0.1102 | 0.5546 |
-| LPIPS    | 0.0413 | 0.1695 | 0.2710 | 0.3585 | 0.5516 |
-| SSIM     | 0.5002 | 0.9299 | 0.9702 | 0.9747 | 0.9815 |
-| Hausdorff| 6.40   | 35.6   | 81.4   | 181.0  | 181.0  |
+Sekcja "typowy" to 4 najniższe FLIP, "trudny" to 4 najwyższe.
+Predykcje są **rozmytymi, niedoświetlonymi blobami** w mniej-więcej-poprawnym
+miejscu kuli; brak ostrych krawędzi i prawidłowego koloru. To
+**zauważalne wzrokowo działanie warunkowania** (różne wejścia = różne
+predykcje, mniej-więcej w odpowiednim miejscu), ale jakość daleka od GT.
 
----
+![Typowy vs trudny](results/qualitative_montage.png)
 
-## Wyniki wizualne
+### Skrajne przypadki
 
-### Predykcja vs GT (8 próbek z testu — typowe + trudne)
-
-Lewy: GT, środek: predykcja generatora (cGAN+L1), prawy: różnica `|GT − Pred|`
-**przemnożona ×4** dla widoczności (predykcje są zwykle bardzo bliskie GT, więc
-surowa różnica byłaby prawie czarna). Górne 4 wiersze: próbki z najniższym
-błędem FLIP; dolne 4: próbki z najwyższym FLIP — pokazują tryby porażki.
-
-![montage](results/qualitative_montage.png)
-
-**Tryby porażki widoczne w sekcji HARD:**
-- przesunięcie/przyciemnienie highlightu (predykcja ma kulę w prawie tym samym
-  miejscu, ale o niższej luminancji),
-- kolorowy szum wokół poprawnej pozycji,
-- chaotyczne wzory na rzadkich, **bardzo bliskich** kulach (większych niż 30%
-  kadru) — w treningu jest ich znikomo mało.
-
-### Skrajne przypadki (best / median / worst per metryka)
-
-![extremes](results/metric_extremes.png)
-
-Najgorszy przypadek dla wszystkich czterech metryk **to ta sama próbka** —
-duża, blisko ustawiona kula gdzie generator wytwarza szum kolorowy zamiast
-gładkiego cieniowania. Ten typ sceny występuje rzadko w zbiorze treningowym
-(rejection sampling spycha rozkład w stronę kul średnio-odległych).
-
-### cGAN vs L1-only
-
-8 obrazów rozłożonych po jasności (lewy = bardzo małe kulki, dolny = duża blisko):
-
-![compare](results/compare_gan_vs_l1.png)
+![Skrajne przypadki](results/metric_extremes.png)
 
 ---
 
-## Eksperymenty dodatkowe
+## Najważniejsza obserwacja: czy metryki dobrze oddają jakość?
 
-### 1) Ablacja: L1-only vs L1 + GAN
+"Czy wszystkie metryki dobrze oddają jakość generowanych
+obrazów?" Na tym konkretnym zadaniu dostaliśmy bardzo wyraźny
+kontrprzykład.
 
-Wytrenowaliśmy ten sam generator wyłącznie z L1 (bez dyskriminatora).
+Wariant z cGAN-em uległ conditioning collapse, sieć generuje
+*tę samą* mapę pikseli (różnica między dwoma bardzo różnymi wejściami:
+~0.002 średnio per piksel) niezależnie od parametrów sceny. To wzrokowo
+oczywisty failure: model w ogóle nie renderuje poszczególnych scen,
+tylko wypluwa stały szablon. A jednak:
 
-| Wariant          | FLIP ↓  | LPIPS ↓ | SSIM ↑  | Hausdorff ↓ |
-|------------------|---------|---------|---------|-------------|
-| L1-only          | 0.0273  | 0.2142  | 0.9748  | **174.65**  |
-| cGAN + L1 (λ=100)| 0.0612  | 0.2677  | 0.9574  | **89.22**   |
+| Metryka     | "Działający" L1-only | Mode-collapsed cGAN | Wskazanie metryki |
+|-------------|----------------------|---------------------|--------------------|
+| FLIP ↓      | 0.954                | **0.052**           | Mode-collapsed jest **18× lepszy** |
+| SSIM ↑      | 0.298                | **0.959**           | Mode-collapsed wygrywa o rząd wielkości |
+| Hausdorff ↓ | 180.5                | **75.2**            | Mode-collapsed lepszy 2.4× |
+| LPIPS ↓     | **0.222**            | 0.237               | L1-only (poprawnie) wygrywa |
 
-**Obserwacja.** L1 bije cGAN we wszystkich metrykach _per-pixel_
-(FLIP/LPIPS/SSIM), ale jest niemal **2× gorszy** w odległości Hausdorffa na
-krawędziach Cannego.
+Czyli **3 z 4 metryk preferują model, który nic nie renderuje**.
 
-**Wyjaśnienie.** L1 minimalizuje średni błąd i naturalnie prowadzi do "rozmytych"
-predykcji — dla małych, jasnych refleksów daje się "zamazać" i wciąż mieć niski
-średni błąd, ale Canny nie wykrywa wtedy żadnych krawędzi. Dla obrazu z brakiem
-krawędzi Hausdorff zwraca przekątną kadru (181 px ≈ 128√2) jako fallback —
-dlatego L1 ma medianę 174 a 90-tą percentyl 181 (połowa testów _nie ma_
-krawędzi w predykcji L1!). Człon adwersarialny zmusza generator do produkowania
-ostrzejszych krawędzi nawet kosztem niewielkiego wzrostu błędu pikselowego.
+### Dlaczego?
 
-To jest dokładnie ten przypadek, w którym **inny zestaw metryk daje sprzeczne
-oceny** — i to celna ilustracja pytania zadania:
+- **SSIM** ~98% kadru to czarne tło, predykcja "całe czarne" daje
+  SSIM ≈ 0.94 niezależnie od jakichkolwiek treści obrazu.
+  Tutaj mode-collapsed cGAN produkuje uśrednioną mapę bardzo bliską
+  rozkładowi tła, więc SSIM rośnie.
 
-> "Czy wszystkie metryki dobrze oddają jakość generowanych obrazów?"
+- **FLIP** uśredniona jest po pikselach z karą za różnice perceptualne.
+  Mode-collapsed model produkuje obraz dominowany przez tło (które niemal
+  zawsze jest zgodne z GT), więc FLIP niski mimo, że obiekt nie jest
+  renderowany.
 
-### 2) Ablacja: kodowanie pozycji (relatywne vs absolutne)
+- **Hausdorff na Cannym** — mode-collapsed cGAN wypuszcza jednolite
+  rozmycia, ale dla połowy próbek Canny i tak coś wykrywa (zarys uśrednionego
+  szablonu), więc średnia Hausdorffa wychodzi sensowna. Z drugiej strony
+  L1-only generuje rozmyte krawędzie, których Canny nie łapie .
 
-Spec wskazówka #1 sugerowała "relatywne zapisanie pozycji". Wytrenowaliśmy
-identyczny model z kodowaniem **absolutnym** (raw `obj_pos / 20`,
-`light_pos / 20`, bez współrzędnych sferycznych).
+- **LPIPS (AlexNet)** wreszcie reaguje na brak obiektu w predykcji
+  mode-collapsed cGAN-a i preferuje wariant, w którym coś jest
+  w przybliżeniu na właściwym miejscu. To jedyna z czterech metryk,
+  która "łapie" tę różnicę.
 
-| Wariant                 | FLIP ↓  | LPIPS ↓ | SSIM ↑  | Hausdorff ↓ |
-|-------------------------|---------|---------|---------|-------------|
-| Relatywne + sin/cos     | 0.0612  | 0.2677  | 0.9574  | 89.22       |
-| Absolutne (xyz / 20)    | 0.0663  | **0.2207** | 0.9555 | **61.91** |
+**Wniosek.** Żadna z metryk per-pixel (FLIP/SSIM/Hausdorff) nie jest na
+tym zadaniu wiarygodnym indykatorem działania warunkowania.
+SSIM jest zdominowane przez tło, Hausdorff z fallbackiem nagradza
+mode-collapse, FLIP wybiera "średnio dopasowane" rozmycie.
+Tylko **LPIPS** koreluje z faktyczną jakością modelu
+jako warunkowego renderera.
 
-**Wynik wbrew hipotezie.** Spodziewaliśmy się, że relatywne kodowanie wygra,
-ponieważ "podajemy generatorowi wiedzę o kamerze". W praktyce wersja z
-absolutnym xyz **wygrała w LPIPS i Hausdorffie** (i była tylko nieznacznie
-gorsza w FLIP/SSIM).
-
-Prawdopodobne wyjaśnienie: w wersji relatywnej cechy `obj_rel` i `(sin az,
-cos az, sin el, cos el)` są ze sobą silnie skorelowane (te drugie są
-deterministyczną funkcją tych pierwszych), więc generator dostaje redundantne
-wejście, a rzeczywista geometria jest "rozproszona" po kilku skorelowanych
-kanałach. Sieć z absolutnym xyz może się natomiast nauczyć **swojego**
-optymalnego rzutowania od zera. Lekcja: dla zadania, w którym sieć dysponuje
-wystarczającą pojemnością i danymi, **nadmiarowe ręczne kodowanie może
-zaszkodzić**, choć dla małych modeli/zbiorów wskazówka #1 wciąż ma sens.
-
----
-
-## Czy wszystkie metryki dobrze oddają jakość?
-
-Krótka odpowiedź: **nie wszystkie, i każda mierzy coś innego**.
-
-- **SSIM** jest tu mało użyteczny: ~95% pikseli jest czarnych, więc nawet
-  predykcja "wszystko czarne" daje SSIM ≈ 0.94 (patrz percentyl p10). Mediana
-  0.97 dla cGAN i 0.97 dla L1 wygląda imponująco, ale w rzeczywistości oba
-  modele różnią się znacząco wizualnie. SSIM jest zdominowany przez tło.
-
-- **FLIP** jest bardziej selektywny — kara za różnicę kolorów highlightów jest
-  widoczna (cGAN 0.06 vs L1 0.03), ale wciąż uśredniony po pikselach więc
-  niedostatecznie dyskryminuje "rozmycie".
-
-- **LPIPS (AlexNet)** ocenia podobieństwo perceptualne — tu, jak FLIP, premiuje
-  L1 (0.21 < 0.27 cGAN), bo AlexNet "widzi" rozmytą kulkę jako bliską GT.
-  Klasyk: LPIPS bywa optymistyczny dla rozmytych wyjść.
-
-- **Hausdorff na krawędziach Cannego** odwraca uporządkowanie i pokazuje że
-  L1 "zgubił krawędzie". Ta metryka jest **bardzo wrażliwa** na pojedynczy
-  outlier (1 piksel daleko = duża wartość) i na fallback gdy obraz nie ma żadnej
-  krawędzi (181 px). Dlatego nasza implementacja zwraca przekątną kadru w tym
-  przypadku zamiast `inf` (`utils/metrics.py:hausdorff_score`).
-
-**Wniosek praktyczny.** Pojedyncza metryka tu jest niewystarczająca. Tylko
-łącznie SSIM/FLIP/LPIPS/Hausdorff dają obraz w którym widać że cGAN poprawia
-ostrość (Hausdorff) kosztem dokładności pikselowej (FLIP/LPIPS), a wybór celu
-(ostrość vs gładkość) zależy od zastosowania.
+W praktyce żadna z tych liczb nie zastąpi **wizualnej inspekcji predykcji**.
 
 ---
-
-## Struktura katalogu
-
-```
-lab3/
-├── generate_dataset.py        # offscreen renderer (moderngl standalone)
-├── train.py                   # cGAN training (--no_gan, --encoding flagi ablacji)
-├── evaluate.py                # FLIP/LPIPS/SSIM/Hausdorff na 600 testach
-├── pyproject.toml
-├── README.md
-├── models/
-│   ├── __init__.py
-│   └── neural_renderer.py     # Generator + PatchGAN Discriminator
-├── utils/
-│   ├── __init__.py
-│   ├── dataset.py             # encode_params (relatywne) / _absolute
-│   └── metrics.py             # FLIP, LPIPS, SSIM, Hausdorff
-├── scripts/
-│   ├── analyze_metrics.py     # best/median/worst per metryka
-│   └── compare_models.py      # cGAN vs L1 montage
-├── checkpoints/               # *.pt (pomijane w git via .gitignore)
-├── data/                      # 3000× 00000.png + labels.json
-└── results/
-    ├── qualitative_montage.png
-    ├── metric_extremes.png
-    ├── compare_gan_vs_l1.png
-    ├── metrics_summary.md
-    └── metrics_per_sample.csv
-```

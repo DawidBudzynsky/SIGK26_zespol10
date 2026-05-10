@@ -1,3 +1,3 @@
-from .neural_renderer import Discriminator, Generator, PARAM_DIM
+from .cgan import Generator, Discriminator, PARAM_DIM
 
-__all__ = ["Discriminator", "Generator", "PARAM_DIM"]
+__all__ = ["Generator", "Discriminator", "PARAM_DIM"]

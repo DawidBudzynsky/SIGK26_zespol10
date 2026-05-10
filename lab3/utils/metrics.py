@@ -1,11 +1,3 @@
-"""Evaluation metrics for the neural renderer (Projekt 3, sec. 3).
-
-Implemented:
-  - FLIP (Andersson et al. 2020) via the official `flip_evaluator` package
-  - LPIPS (Zhang 2018)             via `lpips` (AlexNet backbone)
-  - SSIM (Wang et al. 2004)        via scikit-image
-  - Hausdorff distance on the Canny edge map of both images
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -15,7 +7,7 @@ from skimage.metrics import structural_similarity as sk_ssim
 
 
 def to_uint8(img: np.ndarray) -> np.ndarray:
-    """Convert a CHW / HWC float-or-uint8 image to HWC uint8."""
+    """CHW/HWC, float[0,1] lub uint8 -> HWC uint8."""
     if img.ndim == 3 and img.shape[0] == 3:
         img = np.transpose(img, (1, 2, 0))
     if img.dtype != np.uint8:
@@ -23,79 +15,66 @@ def to_uint8(img: np.ndarray) -> np.ndarray:
     return img
 
 
-# ---------- FLIP --------------------------------------------------------------
-_flip_module = None
+_flip = None
 def flip_score(pred: np.ndarray, gt: np.ndarray) -> float:
-    global _flip_module
-    if _flip_module is None:
+    global _flip
+    if _flip is None:
         import flip_evaluator
-        _flip_module = flip_evaluator
-    pred = to_uint8(pred)
-    gt = to_uint8(gt)
-    _, mean, _ = _flip_module.evaluate(gt, pred, "LDR")
+        _flip = flip_evaluator
+    _, mean, _ = _flip.evaluate(to_uint8(gt), to_uint8(pred), "LDR")
     return float(mean)
 
 
-# ---------- LPIPS -------------------------------------------------------------
 _lpips_model = None
-_lpips_device = None
+_lpips_dev = None
 def lpips_score(pred: np.ndarray, gt: np.ndarray, device: str = "cuda") -> float:
-    global _lpips_model, _lpips_device
-    if _lpips_model is None or _lpips_device != device:
+    global _lpips_model, _lpips_dev
+    if _lpips_model is None or _lpips_dev != device:
         import lpips
         _lpips_model = lpips.LPIPS(net="alex").to(device).eval()
-        _lpips_device = device
+        _lpips_dev = device
 
-    def _to_tensor(img):
-        img = to_uint8(img).astype(np.float32) / 255.0   # [0,1]
-        img = img * 2.0 - 1.0                            # [-1,1]
-        img = np.transpose(img, (2, 0, 1))[None]
-        return torch.from_numpy(img).to(device)
+    def _t(img):
+        x = to_uint8(img).astype(np.float32) / 255.0
+        x = x * 2.0 - 1.0
+        return torch.from_numpy(np.transpose(x, (2, 0, 1))[None]).to(device)
 
     with torch.no_grad():
-        d = _lpips_model(_to_tensor(pred), _to_tensor(gt))
-    return float(d.item())
+        return float(_lpips_model(_t(pred), _t(gt)).item())
 
 
-# ---------- SSIM --------------------------------------------------------------
 def ssim_score(pred: np.ndarray, gt: np.ndarray) -> float:
-    pred = to_uint8(pred)
-    gt = to_uint8(gt)
-    return float(sk_ssim(gt, pred, channel_axis=2, data_range=255))
+    return float(sk_ssim(to_uint8(gt), to_uint8(pred), channel_axis=2, data_range=255))
 
 
-# ---------- Hausdorff on Canny edges -----------------------------------------
-def _canny_points(img_uint8: np.ndarray) -> np.ndarray:
+def _canny_points(img_u8: np.ndarray) -> np.ndarray:
     import cv2
-    gray = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2GRAY)
+    gray = cv2.cvtColor(img_u8, cv2.COLOR_RGB2GRAY)
     edges = cv2.Canny(gray, 100, 200)
-    pts = np.argwhere(edges > 0).astype(np.float32)   # (N, 2) of (y, x)
-    return pts
+    return np.argwhere(edges > 0).astype(np.float32)
 
 
 def hausdorff_score(pred: np.ndarray, gt: np.ndarray) -> float:
-    """Symmetric Hausdorff distance between the two images' Canny edge sets.
+    """Symetryczna odległość Hausdorffa na krawędziach Cannego.
 
-    If one of the two has no edges (pure-black render), we return the diagonal
-    of the image as a worst-case distance so the metric stays finite.
+    Jeśli któryś obraz nie ma żadnych krawędzi (np. czarna predykcja),
+    zwracamy przekątną kadru, żeby metryka pozostała skończona —
+    `inf` zatruwałoby średnie. To miejsce trzeba mieć z tyłu głowy
+    przy interpretacji wyników (omówione w README).
     """
-    pred = to_uint8(pred)
-    gt = to_uint8(gt)
-    p = _canny_points(pred)
-    g = _canny_points(gt)
-    h, w = pred.shape[:2]
+    p, g = to_uint8(pred), to_uint8(gt)
+    ep = _canny_points(p); eg = _canny_points(g)
+    h, w = p.shape[:2]
     diag = float(np.hypot(h, w))
-    if len(p) == 0 or len(g) == 0:
+    if len(ep) == 0 or len(eg) == 0:
         return diag
-    d1 = directed_hausdorff(p, g)[0]
-    d2 = directed_hausdorff(g, p)[0]
-    return float(max(d1, d2))
+    return float(max(directed_hausdorff(ep, eg)[0], directed_hausdorff(eg, ep)[0]))
 
 
 def all_metrics(pred: np.ndarray, gt: np.ndarray, device: str = "cuda") -> dict:
     return {
-        "FLIP":     flip_score(pred, gt),
-        "LPIPS":    lpips_score(pred, gt, device=device),
-        "SSIM":     ssim_score(pred, gt),
+        "FLIP":      flip_score(pred, gt),
+        "LPIPS":     lpips_score(pred, gt, device=device),
+        "SSIM":      ssim_score(pred, gt),
         "Hausdorff": hausdorff_score(pred, gt),
     }
