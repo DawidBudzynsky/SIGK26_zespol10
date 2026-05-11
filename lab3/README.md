@@ -223,3 +223,152 @@ jako warunkowego renderera.
 W praktyce żadna z tych liczb nie zastąpi **wizualnej inspekcji predykcji**.
 
 ---
+
+## Zmiany wprowadzone po oddaniu
+
+Po pierwszej iteracji wróciliśmy do projektu z jednym celem: wycisnąć z modelu
+lepsze predykcje wykorzystując sugestie z dyskusji o funkcjach straty. Bazowy
+zarys (per-pixel implicit renderer, dataset z dostarczonego renderera, kodowanie
+relatywne do kamery) zostawiamy nietknięty.
+
+### Co zmieniono
+
+1. **Dodanie VGG perceptual loss** (`models/vgg_loss.py`). L1 w przestrzeni cech
+   VGG16 (warstwy `relu1_2`, `relu2_2`, `relu3_3`, ImageNet-pretrained,
+   zamrożony). Karze za niedopasowanie *kształtu* i *lokalizacji* obiektu, nie
+   tylko piksel-w-piksel — adresuje znany problem L1/MSE, gdzie pod
+   niepewnością pozycji optymalna predykcja zbiega do *uśrednionego rozmycia*.
+   Strata generatora rozszerzona o `+ lambda_vgg * VGG(fake, real)`.
+2. **Wydłużenie treningu z 7 do 40 epok**. Poprzednie 7 epok kończyło się przed
+   plateau; dłuższy harmonogram pozwolił modelowi domalować jaśniejsze i
+   ostrzejsze regiony.
+
+### Czego próbowaliśmy a nie zadziałało
+
+- **Większy generator** (`base=160, n_refine=6, mlp_hidden=320, mlp_depth=4`,
+  1.86M params zamiast 0.35M) — z VGG zwijał się do all-black w ciągu 2 epok
+  (`|G(p1) - G(p2)| ≈ 3e-5`, predykcja max < 0.002). Również wariant pośredni
+  (`base=128, n_refine=4`) ten sam los.
+- **LeakyReLU(0.2)** zamiast ReLU w większym generatorze (hipoteza: martwe ReLU
+  zrywają gradient) — nie pomogło.
+- **Mask-weighted L1** zamiast mask-weighted MSE (hipoteza: gradient MSE zanika
+  blisko zera) — nie pomogło.
+- **Mask weight 50× zamiast 10×** — nie pomogło.
+- **`lambda_vgg=5` lub `10`** — VGG perceptual features faworyzują *spójne,
+  jednorodne* tekstury, a all-black na 99.4% kadru jest najbardziej spójne ze
+  wszystkich możliwych wyjść. Z dużą wagą VGG dominował recon (5·0.18 = 0.9 vs
+  50·0.005 = 0.25) i model trafiał w to lokalne minimum.
+
+Ostatecznie zadziałał **mały, znany generator** (`base=96, n_refine=3,
+mlp_hidden=192, mlp_depth=2`, ~0.35M params) z **`lambda_vgg=0.5`** — VGG ma
+realny wpływ, ale jest dominowany przez ważoną MSE rekonstrukcji, więc nie
+zawłaszcza optymalizacji.
+
+### Porównanie wyników (na tych samych 600 obrazach testowych)
+
+| Wariant | FLIP ↓ | LPIPS ↓ | SSIM ↑ | Hausdorff ↓ |
+|---------|--------|---------|--------|-------------|
+| neural_renderer L1-only (7 epok, baseline) | 0.9538 | 0.2224 | 0.2981 | 180.48 |
+| neural_renderer + cGAN (mode-collapsed) | 0.0520 | 0.2368 | 0.9594 | 75.22 |
+| **neural_renderer + VGG (40 epok, no_gan)** | **0.0456** | **0.1392** | **0.9625** | **43.22** |
+
+Nowy model wygrywa **we wszystkich czterech metrykach**, w tym w **LPIPS** —
+która była jedyną metryką prawidłowo karzącą mode-collapse w pierwszej
+iteracji. To znaczy że poprawa jest *prawdziwa* (nie artefakt jednej metryki),
+i nie jest to kolejny mode-collapse: LPIPS spadł z 0.222 → 0.139, czyli o ~37%.
+
+Diagnostyka warunkowania: `|G(p1) - G(p2)| ≈ 0.0086` na piksel (vs ~3e-5 dla
+collapsed cGAN-a i ~0.07 dla starego L1-only). Model **reaguje na wejście**
+zauważalnie — predykcja zmienia się gdy zmieniają się parametry sceny.
+
+Mediana Hausdorff = 8 px (vs fallback 181 dla starego L1-only) — Canny w
+~90% próbek wykrywa krawędzie predykcji, czyli predykcje mają wystarczająco
+ostre granice żeby uznać je za "kulę z konturem", a nie rozmytą plamę.
+
+### Zaktualizowana wizualizacja jakościowa
+
+![Typowy vs trudny (po zmianach)](results/l1_vgg/qualitative_montage.png)
+
+Predykcje nie są fotorealistyczne — wciąż brak silnego cieniowania Phonga,
+kolor jest stłumiony — ale są **rozmytymi kulami w mniej-więcej-poprawnym
+miejscu, z odpowiednią skalą i mniej-więcej-zgodną jasnością**. To duży skok
+nad poprzednim L1-only (predykcje były szare placki bez wyraźnego kształtu) i
+nad mode-collapsed cGAN-em (predykcja stała, niezależna od wejścia).
+
+### Krzywe straty (nowy trening)
+
+![Loss curves (small + VGG, 40 epok)](results/l1_vgg/loss_curves.png)
+
+L1 schodzi z 0.234 (epoka 1) do 0.0047 (epoka 40) i wciąż maleje — trening
+nie był wysycony. Dłuższe okno (80-100 epok) prawdopodobnie poprawiłoby
+jeszcze metryki, ale wybór 40 to kompromis czas/efekt.
+
+### Skrajne przypadki (nowy model)
+
+![Skrajne przypadki (po zmianach)](results/l1_vgg/metric_extremes.png)
+
+Dla wszystkich czterech metryk najgorsze przypadki to **duże kule blisko
+kamery** (zajmujące większą część kadru) — model wciąż nie nauczył się
+poprawnie cieniować dużych obiektów. Najlepsze przypadki to **małe,
+oddalone kule** — wystarczy umieścić jasną plamkę w odpowiednim miejscu.
+
+### Dorzucenie cGAN-a (pretrain → finetune)
+
+Bazowy model L1+VGG produkuje rozmyte, niedoświetlone kule — to typowy
+artefakt L1/MSE (predykcja "uśrednia hipotezy o pozycji"). Dorzucamy człon
+adwersarialny w trybie *fine-tune* (klasyczny pix2pix-style pretrain L1 →
+finetune z GAN), żeby zobaczyć czy uda się utrzymać warunkowanie (które
+poprzednio zwijało się natychmiast po włączeniu GAN-a) i jednocześnie
+domalować kolor i krawędzie.
+
+Setup:
+- Inicjalizacja generatora z `l1_vgg.pt` (przez nowo dodaną flagę
+  `--init_from`); dyskryminator startuje od zera
+- `lr=1e-4` (połowa pierwotnego 2e-4 — finetune nie wybija pretrenowanych wag)
+- `lambda_l1=50`, `lambda_vgg=0.5`, GAN-loss z wagą 1.0
+- 20 epok, batch 32
+
+Warunkowanie nie uległo collapse: `|G(p1) - G(p2)| ≈ 0.0055` na piksel
+(vs ~3e-5 dla mode-collapsed cGAN-a sprzed pretrainu, ~0.0086 dla
+samego L1+VGG). Model wciąż wyraźnie reaguje na wejście, GAN dodał
+głównie *intensywność* (max predykcji wzrósł z 0.58 → 0.79) i kolor.
+
+Porównanie wszystkich czterech wariantów na tym samym zbiorze testowym:
+
+| Wariant | FLIP ↓ | LPIPS ↓ | SSIM ↑ | Hausdorff ↓ |
+|---------|--------|---------|--------|-------------|
+| neural_renderer L1-only (7 epok, baseline) | 0.9538 | 0.2224 | 0.2981 | 180.48 |
+| neural_renderer + cGAN from scratch (mode-collapsed) | 0.0520 | 0.2368 | 0.9594 | 75.22 |
+| neural_renderer + VGG (40 epok, no_gan) | 0.0456 | 0.1392 | 0.9625 | 43.22 |
+| **neural_renderer + VGG + cGAN finetune (20 epok)** | **0.0428** | **0.0933** | **0.9648** | **27.07** |
+
+Mediana Hausdorff = **12 px** (vs 8 dla L1+VGG, ale tutaj p90 = 36 zamiast
+181 — czyli outlierów z Canny-fallbackiem jest dużo mniej; mediana Hausdorff
+pomijała ten ogon).
+
+![Typowy vs trudny (L1+VGG+cGAN)](results/l1_vgg_gan/qualitative_montage.png)
+
+Patrząc na predykcje — widać że dyskryminator **dorzucił kolor i highlight**.
+Tam gdzie L1+VGG malował szarą plamkę, L1+VGG+cGAN rysuje *kolorową kulę
+z poprawnym (mniej-więcej) odcieniem*: niebieskie, zielone, fioletowe,
+żółte. Dla dużych kul blisko kamery model wciąż nie domyka pełnego
+zacieniowania (predykcja zwykle mniejsza niż GT), ale kolor i lokalizacja
+są poprawne.
+
+![Loss curves (cGAN finetune)](results/l1_vgg_gan/loss_curves.png)
+
+D-loss oscyluje 0.40-0.50 (D nie dominuje — gdyby tak było, D-loss → 0).
+G-loss rośnie z 1.4 do 3.2 — GAN podnosi karę za "łatwe rozwiązania", ale
+nie do poziomu który by zerwał uczenie L1+VGG. To zdrowy adwersarialny
+balans.
+
+![Skrajne przypadki (cGAN finetune)](results/l1_vgg_gan/metric_extremes.png)
+
+**Wniosek.** Klasyczny pix2pix przepis (L1 pretrain → GAN finetune) zadziałał
+tu zgodnie z literaturą: warunkowanie pozostało, GAN dodał ostrości i koloru.
+Wszystkie cztery metryki się poprawiły, w tym LPIPS o 33% i Hausdorff o 37%.
+Jednocześnie ten wynik **pokazuje wartość VGG perceptual loss** — bez niego
+generator nie miałby wystarczająco "kompetencyjnego" punktu startowego, żeby
+GAN nie wepchnął go z powrotem w mode-collapse.
+
+---
