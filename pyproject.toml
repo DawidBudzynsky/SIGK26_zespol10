@@ -19,9 +19,19 @@ dependencies = [
     "opencv-python-headless>=4.8.0",
     "matplotlib>=3.7.0",
     "torchmetrics>=1.0.0",
+    "bvhio>=0.2.0",
+    "scikit-learn>=1.3.0",
+    "einops>=0.7.0",
+    "pandas>=2.0.0",
 ]
 
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.uv]
+# Repo zawiera luźne skrypty top-level (`train_*.py`) importujące moduły
+# z `src/`. Nie chcemy żeby uv próbował budować/instalować "sigk" jako
+# pakiet — wystarczy że zarządza venv-em z dependencjami.
+package = false

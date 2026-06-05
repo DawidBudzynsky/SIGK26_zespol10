@@ -1,6 +1,12 @@
 # Data
 data/
 
+# Training outputs (gif-y, checkpointy)
+output/
+
+# macOS
+.DS_Store
+
 # Model weights
 denoising_model.pth
 upscale_model.pth
