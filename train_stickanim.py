@@ -67,8 +67,10 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module):
-        for ema_p, p in zip(self.shadow.parameters(), model.parameters()):
-            ema_p.lerp_(p, 1.0 - self.decay)
+        ema_params = list(self.shadow.parameters())
+        model_params = list(model.parameters())
+        # Single fused foreach kernel instead of a Python-level per-tensor loop.
+        torch._foreach_lerp_(ema_params, model_params, 1.0 - self.decay)
 
     def state_dict(self):
         return self.shadow.state_dict()
@@ -155,11 +157,26 @@ def train(args):
 
     loader = DataLoader(train_ds, batch_size=args.batch_size,
                         shuffle=True, num_workers=args.num_workers,
-                        pin_memory=(device.type == "cuda"))
+                        pin_memory=(device.type == "cuda"),
+                        persistent_workers=(args.num_workers > 0),
+                        drop_last=True)
 
     model = build_model(args).to(device)
     diffusion = make_diffusion(args).to(device)
     ema = EMA(model, decay=args.ema_decay)
+
+    if args.compile and device.type == "cuda":
+        model = torch.compile(model)
+
+    # Mixed precision: prefer bf16 on Ampere+ (no GradScaler needed), else fp16.
+    use_amp = args.amp and device.type == "cuda"
+    amp_dtype = (torch.bfloat16
+                 if use_amp and torch.cuda.is_bf16_supported()
+                 else torch.float16)
+    scaler = torch.amp.GradScaler("cuda",
+                                  enabled=(use_amp and amp_dtype == torch.float16))
+    if use_amp:
+        print(f"AMP enabled: {amp_dtype}")
 
     opt = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs, eta_min=1e-6)
@@ -184,25 +201,29 @@ def train(args):
         n = 0
         bar = tqdm(loader, desc=f"epoch {epoch:03d}/{args.epochs}", leave=False)
         for batch in bar:
-            x0 = batch["x0"].to(device)
-            label = batch["label"].to(device)
-            bone_scale = batch["bone_scale"].to(device)
-            rest_bones = batch["rest_bones"].to(device)
+            x0 = batch["x0"].to(device, non_blocking=True)
+            label = batch["label"].to(device, non_blocking=True)
+            bone_scale = batch["bone_scale"].to(device, non_blocking=True)
+            rest_bones = batch["rest_bones"].to(device, non_blocking=True)
             t = torch.randint(0, diffusion.T, (x0.shape[0],), device=device)
 
-            target, pred, x_t, noise, _ = diffusion.training_pred(
-                model, x0, t, label, cfg_drop_prob=args.cfg_drop)
-            x0_pred = diffusion.x0_from_pred(pred, x_t, t)
-
-            losses = total_loss(target, pred, x0_pred,
+            # Heavy transformer forward runs in mixed precision; the geometric
+            # losses are recomputed in fp32 for numerical stability.
+            with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
+                target, pred, x_t, noise, _ = diffusion.training_pred(
+                    model, x0, t, label, cfg_drop_prob=args.cfg_drop)
+            x0_pred = diffusion.x0_from_pred(pred.float(), x_t.float(), t)
+            losses = total_loss(target.float(), pred.float(), x0_pred,
                                 rest_bones, bone_scale, mean, std,
                                 weights=weights,
                                 use_world_losses=args.use_world_losses)
             opt.zero_grad(set_to_none=True)
-            losses["total"].backward()
+            scaler.scale(losses["total"]).backward()
             if args.grad_clip > 0:
+                scaler.unscale_(opt)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             ema.update(model)
 
             bs = x0.shape[0]
@@ -328,6 +349,11 @@ def build_argparser() -> argparse.ArgumentParser:
     ap.add_argument("--epochs", type=int, default=400)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--num-workers", type=int, default=4)
+    ap.add_argument("--amp", action="store_true", default=True,
+                    help="Use CUDA automatic mixed precision (bf16/fp16).")
+    ap.add_argument("--no-amp", dest="amp", action="store_false")
+    ap.add_argument("--compile", action="store_true", default=False,
+                    help="Wrap the model in torch.compile (CUDA only).")
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--grad-clip", type=float, default=1.0)
@@ -375,6 +401,13 @@ def main(argv=None):
     args = build_argparser().parse_args(argv)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+
+    # Enable the fast CUDA math paths (TF32 matmuls + cuDNN autotuner).
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
     if args.skip_train:
         # Build the bare model and load checkpoint for evaluation.

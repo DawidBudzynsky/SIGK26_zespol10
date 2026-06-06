@@ -83,12 +83,14 @@ class AdaLNAttention(nn.Module):
         B, N, _ = qkv.shape
         qkv = qkv.reshape(B, N, 3, self.n_heads, -1).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]  # [B, H, N, Dh]
-        attn = (q @ k.transpose(-2, -1)) / math.sqrt(q.shape[-1])
-        if bias is not None:
-            attn = attn + bias
-        attn = attn.softmax(dim=-1)
-        attn = F.dropout(attn, p=self.dropout, training=self.training)
-        out = attn @ v  # [B, H, N, Dh]
+        # Fused scaled-dot-product attention. On CUDA this dispatches to the
+        # Flash / memory-efficient kernels; the skeleton bias is passed as an
+        # additive float attn_mask (broadcast over batch and heads).
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=bias,
+            dropout_p=self.dropout if self.training else 0.0,
+        )  # [B, H, N, Dh]
         out = out.transpose(1, 2).reshape(B, N, -1)
         out = self.proj(out)
         return gate.unsqueeze(1) * out

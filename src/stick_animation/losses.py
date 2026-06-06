@@ -43,6 +43,25 @@ for _j in range(N_JOINTS):
         _LOCAL_OF[_j] = _li
         _li += 1
 
+# Index tensors used by the vectorised geometry helpers. Built once on CPU and
+# cached per-device so the hot training path avoids Python-level joint loops.
+_NON_ROOT = [j for j in range(N_JOINTS) if j != int(Joint.PELVIS)]
+_BONE_CHILD = [c for c, _ in BONES]
+_BONE_PARENT = [p for _, p in BONES]
+_INDEX_CACHE: Dict[torch.device, Dict[str, torch.Tensor]] = {}
+
+
+def _indices(device: torch.device) -> Dict[str, torch.Tensor]:
+    cache = _INDEX_CACHE.get(device)
+    if cache is None:
+        cache = {
+            "non_root": torch.tensor(_NON_ROOT, dtype=torch.long, device=device),
+            "child": torch.tensor(_BONE_CHILD, dtype=torch.long, device=device),
+            "parent": torch.tensor(_BONE_PARENT, dtype=torch.long, device=device),
+        }
+        _INDEX_CACHE[device] = cache
+    return cache
+
 
 @dataclass
 class LossWeights:
@@ -109,11 +128,11 @@ def world_from_rep(
     wz = lz
     local_world = torch.stack([wx, wy, wz], dim=-1) + pelvis.unsqueeze(2)
 
+    idx = _indices(x.device)
     world = torch.empty(B, T, N_JOINTS, 3, device=x.device, dtype=x.dtype)
     world[:, :, int(Joint.PELVIS)] = pelvis
-    non_root = [j for j in range(N_JOINTS) if j != int(Joint.PELVIS)]
-    for li, j in enumerate(non_root):
-        world[:, :, j] = local_world[:, :, li]
+    # Scatter the 14 non-root joints into their global slots in one shot.
+    world.index_copy_(2, idx["non_root"], local_world)
     return world
 
 
@@ -124,13 +143,11 @@ def world_from_rep(
 
 def bone_length_loss(world: torch.Tensor, rest_bones: torch.Tensor) -> torch.Tensor:
     """world: [B, T, 15, 3]. rest_bones: [B, n_bones]."""
-    # Compute per-bone length per frame.
-    parts = []
-    for c, p in BONES:
-        d = world[:, :, c] - world[:, :, p]
-        parts.append(torch.linalg.norm(d, dim=-1))  # [B, T]
-    lengths = torch.stack(parts, dim=-1)  # [B, T, n_bones]
-    target = rest_bones.unsqueeze(1)      # [B, 1, n_bones]
+    # Gather child/parent endpoints for every bone at once → [B, T, n_bones, 3].
+    idx = _indices(world.device)
+    d = world.index_select(2, idx["child"]) - world.index_select(2, idx["parent"])
+    lengths = torch.linalg.norm(d, dim=-1)  # [B, T, n_bones]
+    target = rest_bones.unsqueeze(1)        # [B, 1, n_bones]
     return F.mse_loss(lengths, target.expand_as(lengths))
 
 

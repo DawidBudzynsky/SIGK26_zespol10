@@ -166,11 +166,17 @@ class Diffusion:
         step_idx = torch.flip(step_idx, dims=[0])
 
         null_label = torch.full_like(class_label, model.null_class_idx)
+        # Concatenate the conditional and unconditional labels so a single
+        # batched forward produces both branches (better GPU utilisation than
+        # two separate calls per DDIM step).
+        labels_in = torch.cat([class_label, null_label], dim=0)
         for i, t in enumerate(step_idx):
             t_b = torch.full((shape[0],), int(t), device=device, dtype=torch.long)
 
-            pred_cond = model(x, t_b, class_label)
-            pred_uncond = model(x, t_b, null_label)
+            x_in = torch.cat([x, x], dim=0)
+            t_in = torch.cat([t_b, t_b], dim=0)
+            pred_both = model(x_in, t_in, labels_in)
+            pred_cond, pred_uncond = pred_both.chunk(2, dim=0)
             pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
 
             x0_pred = self.x0_from_pred(pred, x, t_b)
