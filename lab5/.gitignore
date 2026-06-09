@@ -1,0 +1,35 @@
+# Data
+data/
+
+# Training outputs (gif-y, checkpointy)
+output/
+
+# macOS
+.DS_Store
+
+# Model weights
+denoising_model.pth
+upscale_model.pth
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Cache
+.ruff_cache/
+
+# Course materials (not part of the project)
+wyklady/

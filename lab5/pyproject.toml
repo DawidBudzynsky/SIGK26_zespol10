@@ -1,0 +1,29 @@
+[project]
+name = "sigk"
+version = "0.1.0"
+description = "sigk_g10"
+authors = [
+    {name = "Your Name",email = "you@example.com"}
+]
+requires-python = ">=3.14"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "scipy>=1.10.0",
+    "tqdm>=4.65.0",
+    "matplotlib>=3.7.0",
+    "bvhio>=0.2.0",
+    "scikit-learn>=1.3.0",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.uv]
+# Repo zawiera luźne skrypty top-level (`train_*.py`) importujące moduły
+# z `src/`. Nie chcemy żeby uv próbował budować/instalować "sigk" jako
+# pakiet — wystarczy że zarządza venv-em z dependencjami.
+package = false
